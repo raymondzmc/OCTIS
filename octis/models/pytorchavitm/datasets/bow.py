@@ -2,6 +2,7 @@
 
 import torch
 from torch.utils.data import Dataset
+from octis.optimization.coherence_loss import compute_pairwise_coherence_matrix
 
 
 class BOWDataset(Dataset):
@@ -18,6 +19,8 @@ class BOWDataset(Dataset):
         """
         self.X = X
         self.idx2token = idx2token
+        self.pairwise_coherence = None
+            
 
     def __len__(self):
         """Return length of dataset."""
@@ -28,3 +31,8 @@ class BOWDataset(Dataset):
         X = torch.FloatTensor(self.X[i])
 
         return {'X': X}
+    
+    def compute_coherence_weight(self, corpus, idx2token):
+        """Compute the pairwise coherence matrix used in coherence loss."""
+        self.coherence_weight = compute_pairwise_coherence_matrix(corpus=corpus, idx2token=idx2token)
+

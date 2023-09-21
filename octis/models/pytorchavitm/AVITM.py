@@ -9,9 +9,9 @@ class AVITM(AbstractModel):
 
     def __init__(self, num_topics=10, model_type='prodLDA', activation='softplus',
                  dropout=0.2, learn_priors=True, batch_size=64, lr=2e-3, momentum=0.99,
-                 solver='adam', num_epochs=100, reduce_on_plateau=False, prior_mean=0.0,
-                 prior_variance=None, num_layers=2, num_neurons=100, num_samples=10,
-                 use_partitions=True):
+                 use_coherence_loss=False, solver='adam', num_epochs=100,
+                 reduce_on_plateau=False, prior_mean=0.0, prior_variance=None, num_layers=2,
+                 num_neurons=100, num_samples=10, use_partitions=True):
         """
             :param num_topics : int, number of topic components, (default 10)
             :param model_type : string, 'prodLDA' or 'LDA' (default 'prodLDA')
@@ -37,6 +37,7 @@ class AVITM(AbstractModel):
         self.hyperparameters['batch_size'] = batch_size
         self.hyperparameters['lr'] = lr
         self.hyperparameters['momentum'] = momentum
+        self.hyperparameters['use_coherence_loss'] = use_coherence_loss
         self.hyperparameters['solver'] = solver
         self.hyperparameters['num_epochs'] = num_epochs
         self.hyperparameters['reduce_on_plateau'] = reduce_on_plateau
@@ -83,11 +84,13 @@ class AVITM(AbstractModel):
             self.vocab = dataset.get_vocabulary()
             x_train, x_test, x_valid, input_size = \
                 self.preprocess(self.vocab, data_corpus_train, test=data_corpus_test,
-                                validation=data_corpus_validation)
+                                validation=data_corpus_validation,
+                                compute_coherence_weight=self.hyperparameters['use_coherence_loss'])
         else:
             self.vocab = dataset.get_vocabulary()
             data_corpus = [' '.join(i) for i in dataset.get_corpus()]
-            x_train, input_size = self.preprocess(self.vocab, train=data_corpus)
+            x_train, input_size = self.preprocess(self.vocab, train=data_corpus,
+                                                  compute_coherence_weight=self.hyperparameters['use_coherence_loss'])
 
         self.model = avitm_model.AVITM_model(
             input_size=input_size, num_topics=self.hyperparameters['num_topics'],
@@ -95,6 +98,7 @@ class AVITM(AbstractModel):
             activation=self.hyperparameters['activation'], dropout=self.hyperparameters['dropout'],
             learn_priors=self.hyperparameters['learn_priors'], batch_size=self.hyperparameters['batch_size'],
             lr=self.hyperparameters['lr'], momentum=self.hyperparameters['momentum'],
+            use_coherence_loss=self.hyperparameters['use_coherence_loss'],
             solver=self.hyperparameters['solver'], num_epochs=self.hyperparameters['num_epochs'],
             reduce_on_plateau=self.hyperparameters['reduce_on_plateau'], num_samples=self.hyperparameters[
                 'num_samples'], topic_prior_mean=self.hyperparameters["prior_mean"],
@@ -124,6 +128,8 @@ class AVITM(AbstractModel):
         self.hyperparameters['lr'] = float(hyperparameters.get('lr', self.hyperparameters['lr']))
         self.hyperparameters['momentum'] = \
             float(hyperparameters.get('momentum', self.hyperparameters['momentum']))
+        self.hyperparameters['use_coherence_loss'] = \
+            hyperparameters.get('use_coherence_loss', self.hyperparameters['use_coherence_loss'])
         self.hyperparameters['solver'] = hyperparameters.get('solver', self.hyperparameters['solver'])
         self.hyperparameters['num_epochs'] = \
             int(hyperparameters.get('num_epochs', self.hyperparameters['num_epochs']))
@@ -142,6 +148,7 @@ class AVITM(AbstractModel):
         self.hyperparameters['hidden_sizes'] = tuple(
             [self.hyperparameters["num_neurons"] for _ in range(self.hyperparameters["num_layers"])])
 
+
     def inference(self, x_test):
         assert isinstance(self.use_partitions, bool) and self.use_partitions
         results = self.model.predict(x_test)
@@ -151,7 +158,7 @@ class AVITM(AbstractModel):
         self.use_partitions = use_partitions
 
     @staticmethod
-    def preprocess(vocab, train, test=None, validation=None):
+    def preprocess(vocab, train, test=None, validation=None, compute_coherence_weight=False):
         vocab2id = {w: i for i, w in enumerate(vocab)}
         vec = CountVectorizer(vocabulary=vocab2id, token_pattern=r'(?u)\b\w+\b')
         entire_dataset = train.copy()
@@ -165,6 +172,12 @@ class AVITM(AbstractModel):
         X_train = vec.transform(train)
         train_data = datasets.BOWDataset(X_train.toarray(), idx2token)
         input_size = len(idx2token.keys())
+
+        if compute_coherence_weight:
+            # Use the entire dataset to compute the pairwise coherence matrix in DAC loss
+            analyzer = vec.build_analyzer()
+            tokenized_dataset = [analyzer(doc) for doc in entire_dataset]
+            train_data.compute_coherence_weight(corpus=tokenized_dataset, idx2token=idx2token)
 
         if test is not None and validation is not None:
             x_test = vec.transform(test)

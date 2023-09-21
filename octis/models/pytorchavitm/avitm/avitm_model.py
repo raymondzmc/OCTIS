@@ -12,14 +12,15 @@ from torch.utils.data import DataLoader
 
 from octis.models.early_stopping.pytorchtools import EarlyStopping
 from octis.models.pytorchavitm.avitm.decoder_network import DecoderNetwork
+from octis.optimization.coherence_loss import CoherenceLoss
 
 
 class AVITM_model(object):
 
     def __init__(self, input_size, num_topics=10, model_type='prodLDA', hidden_sizes=(100, 100),
                  activation='softplus', dropout=0.2, learn_priors=True, batch_size=64, lr=2e-3, momentum=0.99,
-                 solver='adam', num_epochs=100, reduce_on_plateau=False, topic_prior_mean=0.0,
-                 topic_prior_variance=None, num_samples=10, num_data_loader_workers=0, verbose=False):
+                 use_coherence_loss=False, solver='adam', num_epochs=100, reduce_on_plateau=False,
+                 topic_prior_mean=0.0, topic_prior_variance=None, num_samples=10, num_data_loader_workers=0, verbose=False):
         """
         Initialize AVITM model.
 
@@ -56,6 +57,8 @@ class AVITM_model(object):
         assert isinstance(batch_size, int) and batch_size > 0, \
             "batch_size must be int > 0."
         assert lr > 0, "lr must be > 0."
+        assert isinstance(use_coherence_loss, bool), \
+            "use_coherence_loss must be type bool."
         assert isinstance(momentum, float) and 0 < momentum <= 1, \
             "momentum must be 0 < float <= 1."
         assert solver in ['adagrad', 'adam', 'sgd', 'adadelta', 'rmsprop'], \
@@ -78,6 +81,7 @@ class AVITM_model(object):
         self.learn_priors = learn_priors
         self.batch_size = batch_size
         self.lr = lr
+        self.use_coherence_loss = use_coherence_loss
         self.momentum = momentum
         self.solver = solver
         self.num_epochs = num_epochs
@@ -90,7 +94,7 @@ class AVITM_model(object):
         self.model = DecoderNetwork(
             input_size, num_topics, model_type, hidden_sizes, activation,
             dropout, learn_priors, topic_prior_mean, topic_prior_variance)
-        self.early_stopping = EarlyStopping(patience=5, verbose=False)
+        self.early_stopping = EarlyStopping(patience=5, verbose=False) if not use_coherence_loss else None
         self.validation_data = None
         # init optimizer
         if self.solver == 'adam':
@@ -118,6 +122,10 @@ class AVITM_model(object):
         # learned topics
         self.best_components = None
 
+        # diversity-aware coherence loss (set)
+        if self.use_coherence_loss:
+            self.coherence_loss = None
+
         # Use cuda if available
         if torch.cuda.is_available():
             self.USE_CUDA = True
@@ -144,6 +152,15 @@ class AVITM_model(object):
         RL = -torch.sum(inputs * torch.log(word_dists + 1e-10), dim=1)
         loss = KL + RL
 
+        if self.use_coherence_loss:
+            if self.coherence_loss is None:
+                raise Exception("`coherence_loss` is not initialized!")
+            batch_size = inputs.shape[0] # scale with RL and KL
+            CL = batch_size * self.coherence_loss(self.model.beta, self.nn_epoch)
+            if self.nn_epoch > 1:
+                pass
+            loss = loss + CL
+            print(f"KL: {KL.sum()}, RL: {RL.sum()}, CL: {CL}")
         return loss.sum()
 
     def _train_epoch(self, loader):
@@ -241,6 +258,14 @@ class AVITM_model(object):
         train_loader = DataLoader(
             self.train_data, batch_size=self.batch_size, shuffle=True,
             num_workers=self.num_data_loader_workers)
+        
+        # coherence loss
+        if self.use_coherence_loss:
+            assert hasattr(train_dataset, 'coherence_weight'), \
+                "training_set missing attribute coherence_weight"
+            self.coherence_loss = CoherenceLoss(train_dataset.coherence_weight, 
+                                                self.num_topics,
+                                                self.num_epochs)
 
         # init training variables
         train_loss = 0
@@ -280,7 +305,7 @@ class AVITM_model(object):
 
                 if np.isnan(val_loss) or np.isnan(train_loss):
                     break
-                else:
+                elif self.early_stopping is not None:
                     self.early_stopping(val_loss, self.model)
                     if self.early_stopping.early_stop:
                         print("Early stopping")
